@@ -2,6 +2,7 @@ import { DAYS_PER_MONTH, TICKS_PER_SECOND } from '../sim/config';
 import { acceptedCargo, producedCargo, Simulation } from '../sim/simulation';
 import type { Building, CargoId, CommandResult, Contract, GameMessage, TruckState } from '../sim/types';
 import { Renderer } from '../render/Renderer';
+import type { Models } from '../render/assets';
 import { t } from '../i18n';
 
 export type Tool = 'select' | 'road' | 'bulldoze' | 'route';
@@ -72,10 +73,11 @@ export class Game {
     canvasHost: HTMLElement,
     private labelHost: HTMLElement,
     seed: number,
+    models: Models,
   ) {
     this.sim = new Simulation(seed);
     this.sim.world.messages.push({ id: 0, day: 0, key: 'msg.welcome', params: {}, tone: 'info' });
-    this.renderer = new Renderer(canvasHost, this.sim.world);
+    this.renderer = new Renderer(canvasHost, this.sim.world, models);
     this.renderer.resize();
     this.createLabels();
     this.snapshot = this.buildSnapshot();
@@ -208,6 +210,14 @@ export class Game {
       this.toast = { text: t(res.reason, res.cost !== undefined ? { cost: res.cost } : undefined), id: Date.now() };
     }
     this.notify();
+  }
+
+  /** Dev helper: renders a frame and saves the canvas to .shots/<name>.jpg via the Vite dev server. */
+  async debugShot(name = 'shot') {
+    for (let i = 0; i < 20; i++) this.renderer.render();
+    const data = this.renderer.renderer.domElement.toDataURL('image/jpeg', 0.85);
+    const res = await fetch('/__shot', { method: 'POST', body: JSON.stringify({ name, data }) });
+    return res.text();
   }
 
   // ---------- loop ----------

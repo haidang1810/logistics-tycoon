@@ -351,3 +351,18 @@ button.small.danger {
     opacity: 0;
   }
 }
+
+/* ---------- loading ---------- */
+.loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  text-align: center;
+  font-weight: 700;
+  background: linear-gradient(#8fcbe8, #f6e7cc);
+}
+.loading .bar {
+  width: 260px;
+}

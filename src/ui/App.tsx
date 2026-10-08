@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { dayToDate, Game, SPEEDS, type Selection, type Snapshot, type Tool } from '../game/Game';
 import { formatMoney, setLang, t, useLang } from '../i18n';
 import { TRUCK } from '../sim/config';
+import { loadModels } from '../render/assets';
 
 const TOOLS: { id: Tool; icon: string; key: string }[] = [
   { id: 'select', icon: '👆', key: '1' },
@@ -14,20 +15,38 @@ export function App() {
   const canvasHost = useRef<HTMLDivElement>(null);
   const labelHost = useRef<HTMLDivElement>(null);
   const [game, setGame] = useState<Game | null>(null);
+  const [progress, setProgress] = useState(0);
 
   useEffect(() => {
+    let g: Game | null = null;
+    let cancelled = false;
     const seed = Number(new URLSearchParams(location.search).get('seed')) || 20261008;
-    const g = new Game(canvasHost.current!, labelHost.current!, seed);
-    setGame(g);
-    (window as unknown as { game: Game }).game = g; // debug handle
-    return () => g.dispose();
+    loadModels((done, total) => setProgress(done / total)).then((models) => {
+      if (cancelled) return;
+      g = new Game(canvasHost.current!, labelHost.current!, seed, models);
+      setGame(g);
+      (window as unknown as { game: Game }).game = g; // debug handle
+    });
+    return () => {
+      cancelled = true;
+      g?.dispose();
+    };
   }, []);
 
   return (
     <div className="app">
       <div className="viewport" ref={canvasHost} />
       <div className="labels" ref={labelHost} />
-      {game && <Hud game={game} />}
+      {game ? (
+        <Hud game={game} />
+      ) : (
+        <div className="loading">
+          <div>🚚 {t('loading')}</div>
+          <div className="bar">
+            <div style={{ width: `${progress * 100}%` }} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

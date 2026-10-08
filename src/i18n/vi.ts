@@ -1,5 +1,6 @@
 export const vi: Record<string, string> = {
   'app.title': 'Chành Xe Tycoon',
+  loading: 'Đang chất hàng lên xe...',
   'unit.million': 'tr',
   'unit.billion': 'tỷ',
 

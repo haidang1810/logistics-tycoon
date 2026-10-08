@@ -38,7 +38,8 @@ const ACCEPTS: Partial<Record<BuildingKind, CargoId[]>> = {
   market: ['rice', 'fruit'],
 };
 
-const TRUCK_COLORS = [0xe8574a, 0x3d8bd9, 0xf2b134, 0x5cb85c, 0x9b59b6, 0xff8c42];
+// Each colour maps to a car model in the renderer.
+const TRUCK_COLORS = [0xe8574a, 0x3d8bd9, 0xf2b134, 0x5cb85c];
 
 export function producedCargo(b: Building): CargoId | undefined {
   return PRODUCES[b.kind];

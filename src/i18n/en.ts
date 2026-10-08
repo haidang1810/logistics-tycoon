@@ -1,5 +1,6 @@
 export const en: Record<string, string> = {
   'app.title': 'Freight Yard Tycoon',
+  loading: 'Loading the trucks...',
   'unit.million': 'M₫',
   'unit.billion': 'B₫',
 
