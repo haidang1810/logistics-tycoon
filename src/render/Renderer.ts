@@ -8,8 +8,11 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { HorizontalTiltShiftShader } from 'three/examples/jsm/shaders/HorizontalTiltShiftShader.js';
 import { VerticalTiltShiftShader } from 'three/examples/jsm/shaders/VerticalTiltShiftShader.js';
 import { VignetteShader } from 'three/examples/jsm/shaders/VignetteShader.js';
-import { Terrain, type Building, type Truck, type WorldState } from '../sim/types';
+import { Terrain, type Building, type CargoId, type Truck, type WorldState } from '../sim/types';
 import { InstancedModel, KAYKIT_SCALE, type ModelName, type Models } from './assets';
+import { PRODUCTION } from '../sim/config';
+
+const PRODUCTION_CAP = PRODUCTION.stockCap;
 
 /** Low-poly palette (cozy, saturated). */
 const C = {
@@ -89,6 +92,35 @@ const CAR_BY_COLOR: Record<number, ModelName> = {
   0x5cb85c: 'car_stationwagon',
 };
 
+const TREE_MODELS: ModelName[] = ['tree_1a', 'tree_1b', 'tree_1c', 'tree_2a', 'tree_2b', 'tree_2c', 'tree_3a', 'tree_3b', 'tree_4a', 'tree_4b'];
+const BUSH_MODELS: ModelName[] = ['bush_1a', 'bush_1c', 'bush_2a', 'bush_2c', 'bush_4a'];
+const ROCK_MODELS: ModelName[] = ['rock_1a', 'rock_1e', 'rock_2a'];
+const GRASS_MODELS: ModelName[] = ['grass_1a', 'grass_2a'];
+const WATER_PLANTS: ModelName[] = ['waterlily_a', 'waterlily_b', 'waterplant_a', 'waterplant_b'];
+/** Village houses for the outskirts of towns (downtown uses KayKit city buildings). */
+const VILLAGE_HOUSES: ModelName[] = ['home_a_red', 'home_b_red', 'home_a_yellow', 'home_b_blue'];
+
+/** What a pile of each cargo looks like; `size` is its footprint width in tiles. */
+const CARGO_PILE: Record<CargoId, { model: ModelName; size: number }> = {
+  paddy: { model: 'sack', size: 0.2 },
+  rice: { model: 'rice_sacks', size: 0.24 },
+  fruit: { model: 'crate', size: 0.16 },
+};
+
+interface Stockpile {
+  building: Building;
+  cargo: CargoId;
+  piles: THREE.Object3D[];
+  shown: number;
+}
+
+/** Stable pseudo-random 0..1 per tile, for render-only decoration. */
+function hash(x: number, y: number, salt: number) {
+  let h = (x * 374761393 + y * 668265263 + salt * 2147483647) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
 /** Renders the world. Reads WorldState; never mutates it. */
 export class Renderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -106,13 +138,10 @@ export class Renderer {
   private streetlights: InstancedModel;
   private pillars: THREE.InstancedMesh;
   private roadVersionDrawn = -1;
-  private trees!: {
-    trunks: THREE.InstancedMesh;
-    round: THREE.InstancedMesh;
-    pineLow: THREE.InstancedMesh;
-    pineHigh: THREE.InstancedMesh;
-  };
+  /** Trees, bushes, rocks, grass tufts and water plants: one InstancedModel per model. */
+  private nature = new Map<ModelName, InstancedModel>();
   private treeVersionDrawn = -1;
+  private stockpiles: Stockpile[] = [];
   private trucks = new Map<number, THREE.Group>();
   private hoverMesh: THREE.Mesh;
   private ghostMesh: THREE.InstancedMesh;
@@ -243,9 +272,11 @@ export class Renderer {
   private onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.key.toLowerCase());
   private onBlur = () => this.keys.clear();
 
-  resize() {
-    const w = this.container.clientWidth;
-    const h = this.container.clientHeight;
+  /** Resizes to the container, or to an explicit size (used for screenshots while the window is hidden). */
+  resize(width?: number, height?: number) {
+    const w = width ?? this.container.clientWidth;
+    const h = height ?? this.container.clientHeight;
+    if (!w || !h) return; // hidden window: keep the last real size
     this.renderer.setSize(w, h);
     this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(w, h);
@@ -341,6 +372,7 @@ export class Renderer {
     if (this.roadVersionDrawn !== this.world.roadVersion) this.buildRoads();
     if (this.treeVersionDrawn !== this.world.roadVersion) this.syncTrees();
     this.syncTrucks();
+    this.syncStockpiles();
     this.selectionMesh.rotation.y = now / 1000;
     this.composer.render(dt);
   }
@@ -489,95 +521,122 @@ export class Renderer {
   }
 
   private buildTrees() {
-    const w = this.world;
-    const max = w.width * w.height;
-    const make = (geo: THREE.BufferGeometry, color: number) => {
-      const m = new THREE.InstancedMesh(geo, mat(color), max);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      m.frustumCulled = false;
-      this.scene.add(m);
-      return m;
-    };
-    this.trees = {
-      trunks: make(new THREE.CylinderGeometry(0.05, 0.08, 0.36, 5), C.trunk),
-      round: make(new THREE.IcosahedronGeometry(0.3, 0), 0xffffff),
-      pineLow: make(new THREE.ConeGeometry(0.32, 0.5, 6), 0xffffff),
-      pineHigh: make(new THREE.ConeGeometry(0.22, 0.42, 6), 0xffffff),
-    };
+    for (const name of [...TREE_MODELS, ...BUSH_MODELS, ...ROCK_MODELS, ...GRASS_MODELS, ...WATER_PLANTS]) {
+      const im = new InstancedModel(this.models[name], 64, { cast: !GRASS_MODELS.includes(name), receive: true });
+      this.nature.set(name, im);
+      this.scene.add(im.group);
+    }
     this.syncTrees();
+  }
+
+  /**
+   * Places trees (from the sim) plus render-only decoration: bushes, rocks and grass tufts on empty
+   * grass, lilies along the river. Positions come from a tile hash, so they are stable between rebuilds.
+   */
+  private widths = new Map<ModelName, number>();
+  /** Native footprint width (max of X/Z extent) of a model. */
+  private modelWidth(name: ModelName) {
+    let w = this.widths.get(name);
+    if (w === undefined) {
+      const size = new THREE.Box3().setFromObject(this.models[name]).getSize(new THREE.Vector3());
+      w = Math.max(size.x, size.z) || 1;
+      this.widths.set(name, w);
+    }
+    return w;
   }
 
   private syncTrees() {
     const w = this.world;
-    const t = this.trees;
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const s = new THREE.Vector3();
-    const p = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-    const color = new THREE.Color();
-    let nt = 0;
-    let nr = 0;
-    let np = 0;
+    const lists = new Map<ModelName, THREE.Matrix4[]>();
+    // `size` is the wanted footprint width in tiles; models come in very different native sizes.
+    const add = (name: ModelName, x: number, y: number, h: number, size: number, rot: number) => {
+      const scale = size / this.modelWidth(name);
+      const m = new THREE.Matrix4().compose(
+        new THREE.Vector3(x, h, y),
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rot),
+        new THREE.Vector3(scale, scale, scale),
+      );
+      if (!lists.has(name)) lists.set(name, []);
+      lists.get(name)!.push(m);
+    };
+    const isTree = (x: number, y: number) => x >= 0 && y >= 0 && x < w.width && y < w.height && w.tree[y * w.width + x] === 1;
+    const isWater = (x: number, y: number) => x >= 0 && y >= 0 && x < w.width && y < w.height && w.terrain[y * w.width + x] === Terrain.Water;
+
     for (let i = 0; i < w.tree.length; i++) {
-      if (!w.tree[i]) continue;
       const x = i % w.width;
       const y = Math.floor(i / w.width);
-      const r = (((x * 928371 + y * 123457) % 1000) + 1000) % 1000 / 1000;
-      const ox = (r - 0.5) * 0.36;
-      const oz = (((r * 7.31) % 1) - 0.5) * 0.36;
-      const k = 0.75 + r * 0.45;
-      q.setFromAxisAngle(up, r * 6.28);
-      s.set(k, k, k);
-      p.set(x + 0.5 + ox, TILE_H + 0.18 * k, y + 0.5 + oz);
-      t.trunks.setMatrixAt(nt++, m.compose(p, q, s));
-      if (r < 0.55) {
-        s.set(k, k * 1.15, k);
-        p.y = TILE_H + 0.62 * k;
-        t.round.setMatrixAt(nr, m.compose(p, q, s));
-        t.round.setColorAt(nr++, color.setHex(C.leaves[Math.floor(r * 40) % C.leaves.length]));
-      } else {
-        p.y = TILE_H + 0.5 * k;
-        t.pineLow.setMatrixAt(np, m.compose(p, q, s));
-        t.pineLow.setColorAt(np, color.setHex(C.pine[np % 2]));
-        p.y = TILE_H + 0.8 * k;
-        t.pineHigh.setMatrixAt(np, m.compose(p, q, s));
-        t.pineHigh.setColorAt(np++, color.setHex(C.pine[(np + 1) % 2]));
+      const r1 = hash(x, y, 1);
+      const r2 = hash(x, y, 2);
+      const r3 = hash(x, y, 3);
+      const cx = x + 0.5 + (r2 - 0.5) * 0.3;
+      const cy = y + 0.5 + (r3 - 0.5) * 0.3;
+
+      if (w.terrain[i] === Terrain.Water) {
+        const nearBank = !isWater(x - 1, y) || !isWater(x + 1, y);
+        if (nearBank && r1 < 0.45) add(WATER_PLANTS[Math.floor(r2 * WATER_PLANTS.length)], cx, cy, 0.13, 0.2 + r1 * 0.15, r3 * 6.28);
+        continue;
       }
+      if (w.road[i] || w.occupant[i] !== -1) continue;
+
+      if (w.tree[i]) {
+        const name = TREE_MODELS[Math.floor(r1 * TREE_MODELS.length)];
+        add(name, cx, cy, TILE_H, 0.7 + r2 * 0.35, r3 * 6.28);
+        // Undergrowth so forests look dense.
+        if (r2 < 0.35) add(BUSH_MODELS[Math.floor(r3 * BUSH_MODELS.length)], x + 0.2 + r3 * 0.6, y + 0.2 + r1 * 0.6, TILE_H, 0.3, r1 * 6.28);
+        continue;
+      }
+      // Open grass: forest edges get bushes, the rest gets the odd rock and grass tuft.
+      const forestEdge = isTree(x - 1, y) || isTree(x + 1, y) || isTree(x, y - 1) || isTree(x, y + 1);
+      if (forestEdge && r1 < 0.3) add(BUSH_MODELS[Math.floor(r2 * BUSH_MODELS.length)], cx, cy, TILE_H, 0.28 + r3 * 0.2, r3 * 6.28);
+      else if (r1 > 0.985) add(ROCK_MODELS[Math.floor(r2 * ROCK_MODELS.length)], cx, cy, TILE_H, 0.22 + r3 * 0.2, r3 * 6.28);
+      if (r3 < 0.12) add(GRASS_MODELS[Math.floor(r1 * GRASS_MODELS.length)], x + 0.15 + r2 * 0.7, y + 0.15 + r1 * 0.7, TILE_H, 0.1, r2 * 6.28);
     }
-    t.trunks.count = nt;
-    t.round.count = nr;
-    t.pineLow.count = t.pineHigh.count = np;
-    for (const mesh of Object.values(t)) {
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    }
+
+    for (const [name, im] of this.nature) im.set(lists.get(name) ?? []);
     this.treeVersionDrawn = w.roadVersion;
   }
 
   private buildBuildings() {
     const w = this.world;
     const isRoad = (x: number, y: number) => x >= 0 && y >= 0 && x < w.width && y < w.height && w.road[y * w.width + x] === 1;
+    const isWater = (x: number, y: number) => x >= 0 && y >= 0 && x < w.width && y < w.height && w.terrain[y * w.width + x] === Terrain.Water;
     const markets = w.buildings.filter((b) => b.kind === 'market');
+
+    /** Angle that turns a model's +Z front towards the first side of the footprint touching `test`. */
+    const facing = (b: Building, test: (x: number, y: number) => boolean): number | null => {
+      const sides: [number, () => boolean][] = [
+        [0, () => range(b.x, b.w).some((x) => test(x, b.y + b.h))],
+        [Math.PI / 2, () => range(b.y, b.h).some((y) => test(b.x + b.w, y))],
+        [Math.PI, () => range(b.x, b.w).some((x) => test(x, b.y - 1))],
+        [-Math.PI / 2, () => range(b.y, b.h).some((y) => test(b.x - 1, y))],
+      ];
+      return sides.find(([, ok]) => ok())?.[0] ?? null;
+    };
+    const near = (b: Building, test: (x: number, y: number) => boolean, dist: number) => {
+      for (let y = b.y - dist; y < b.y + b.h + dist; y++) for (let x = b.x - dist; x < b.x + b.w + dist; x++) if (test(x, y)) return true;
+      return false;
+    };
+
     for (const b of w.buildings) {
       let g: THREE.Object3D;
       if (b.kind === 'house') {
-        // Taller buildings near the market, small ones at the edge of town.
+        // Town centre: city blocks (taller near the market). Outskirts: village houses with tiled roofs.
         const d = Math.min(...markets.map((m) => Math.abs(m.x - b.x) + Math.abs(m.y - b.y)));
-        const pool = d <= 3 ? BUILDINGS : BUILDINGS.slice(0, 4);
-        g = this.models[pool[(b.variant + b.x + b.y) % pool.length]].clone();
-        g.scale.setScalar(KAYKIT_SCALE);
-        // Face the street: model front is +Z.
-        const faces: [boolean, number][] = [
-          [isRoad(b.x, b.y + 1), 0],
-          [isRoad(b.x + 1, b.y), Math.PI / 2],
-          [isRoad(b.x, b.y - 1), Math.PI],
-          [isRoad(b.x - 1, b.y), -Math.PI / 2],
-        ];
-        g.rotation.y = faces.find(([ok]) => ok)?.[1] ?? (b.variant % 4) * (Math.PI / 2);
+        const pick = b.variant + b.x + b.y;
+        if (d <= 4) {
+          const pool = d <= 2 ? BUILDINGS : BUILDINGS.slice(0, 4);
+          g = this.models[pool[pick % pool.length]].clone();
+          g.scale.setScalar(KAYKIT_SCALE);
+        } else {
+          g = this.models[VILLAGE_HOUSES[pick % VILLAGE_HOUSES.length]].clone();
+          g.scale.setScalar(0.62);
+        }
+        g.rotation.y = facing(b, isRoad) ?? (b.variant % 4) * (Math.PI / 2);
       } else {
-        g = makeBuilding(b, this.models);
+        // Water mill when there is a river close by (wheel towards the water), windmill otherwise.
+        const waterSide = b.kind === 'mill' && near(b, isWater, 3) ? facingWater(b, isWater) : null;
+        g = makeBuilding(b, this.models, { front: facing(b, isRoad) ?? 0, waterSide });
+        for (const [cargo, spots] of pileSpots(b)) this.addStockpile(b, cargo, spots, g);
       }
       g.position.set(b.x + b.w / 2, TILE_H, b.y + b.h / 2);
       g.traverse((o) => {
@@ -590,6 +649,36 @@ export class Renderer {
     }
   }
 
+  /** Piles of goods next to a building that grow with its stock, so bottlenecks are visible at a glance. */
+  private addStockpile(b: Building, cargo: CargoId, spots: [number, number][], parent: THREE.Object3D) {
+    const look = CARGO_PILE[cargo];
+    const scale = look.size / this.modelWidth(look.model);
+    const layerHeight = new THREE.Box3().setFromObject(this.models[look.model]).getSize(new THREE.Vector3()).y * scale;
+    const piles: THREE.Object3D[] = [];
+    for (let layer = 0; layer < 2; layer++) {
+      for (const [x, z] of spots) {
+        const o = this.models[look.model].clone();
+        o.scale.setScalar(scale);
+        o.position.set(x, 0.05 + layer * layerHeight, z);
+        o.rotation.y = hash(b.id, piles.length, 7) * 0.6 - 0.3;
+        o.visible = false;
+        parent.add(o);
+        piles.push(o);
+      }
+    }
+    this.stockpiles.push({ building: b, cargo, piles, shown: 0 });
+  }
+
+  private syncStockpiles() {
+    for (const s of this.stockpiles) {
+      const perPile = PRODUCTION_CAP / s.piles.length;
+      const n = Math.min(s.piles.length, Math.ceil((s.building.stock[s.cargo] ?? 0) / perPile));
+      if (n === s.shown) continue;
+      s.piles.forEach((p, i) => (p.visible = i < n));
+      s.shown = n;
+    }
+  }
+
   private syncTrucks() {
     const w = this.world;
     const alive = new Set<number>();
@@ -597,7 +686,8 @@ export class Renderer {
       alive.add(t.id);
       let g = this.trucks.get(t.id);
       if (!g) {
-        g = makeTruck(t, this.models);
+        const look = CARGO_PILE[t.cargo];
+        g = makeTruck(t, this.models, (look.size * 0.75) / this.modelWidth(look.model));
         this.trucks.set(t.id, g);
         this.scene.add(g);
       }
@@ -671,81 +761,101 @@ function kit(models: Models, name: ModelName, x: number, y: number, z: number, s
   return o;
 }
 
-function makeBuilding(b: Building, models: Models): THREE.Group {
+function range(start: number, count: number) {
+  return Array.from({ length: count }, (_, i) => start + i);
+}
+
+/** Angle that turns the water mill's wheel (on its -X side) towards the closest water. */
+function facingWater(b: Building, isWater: (x: number, y: number) => boolean): number {
+  const cx = b.x + b.w / 2;
+  const cy = b.y + b.h / 2;
+  let best = { d: Infinity, dx: -1, dy: 0 };
+  for (let y = b.y - 3; y < b.y + b.h + 3; y++) {
+    for (let x = b.x - 3; x < b.x + b.w + 3; x++) {
+      if (!isWater(x, y)) continue;
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      const d = dx * dx + dy * dy;
+      if (d < best.d) best = { d, dx, dy };
+    }
+  }
+  // -X → W: 0, E: π, N: -π/2, S: +π/2
+  if (Math.abs(best.dx) >= Math.abs(best.dy)) return best.dx < 0 ? 0 : Math.PI;
+  return best.dy < 0 ? -Math.PI / 2 : Math.PI / 2;
+}
+
+/** Where piles of each stocked cargo sit, in the building's local (unrotated) frame. */
+function pileSpots(b: Building): [CargoId, [number, number][]][] {
+  switch (b.kind) {
+    case 'farm':
+      return [['paddy', [[0.8, 0.8], [0.55, 0.88], [-0.8, 0.8], [-0.55, 0.88]]]];
+    case 'orchard':
+      return [['fruit', [[-0.75, 0.88], [-0.45, 0.88], [0.45, 0.88], [0.75, 0.88]]]];
+    case 'mill':
+      return [
+        ['paddy', [[-0.78, 0.78], [-0.48, 0.82]]],
+        ['rice', [[0.48, 0.82], [0.78, 0.78]]],
+      ];
+    default:
+      return [];
+  }
+}
+
+function makeBuilding(b: Building, models: Models, opts: { front: number; waterSide: number | null }): THREE.Group {
   const g = new THREE.Group();
   const v = b.variant;
   switch (b.kind) {
     case 'farm': {
-      // Four paddy plots separated by earthen dykes, rows of rice, a thatched hut.
+      // Golden rice field on an earth plot, a thatched hut and a wheelbarrow in the corners.
       g.add(box(1.98, 0.04, 1.98, C.dyke));
-      for (let i = 0; i < 4; i++) {
-        const px = ((i % 2) - 0.5) * 0.98;
-        const pz = (Math.floor(i / 2) - 0.5) * 0.98;
-        g.add(box(0.86, 0.03, 0.86, C.paddyWater, px, 0.03, pz));
-        for (let r = 0; r < 4; r++) {
-          g.add(box(0.76, 0.1, 0.07, C.paddy[(i + r + v) % C.paddy.length], px, 0.04, pz - 0.3 + r * 0.2));
-        }
-      }
+      g.add(kit(models, 'grain', 0, 0.03, 0, 0.92, (v % 2) * Math.PI));
       const hut = new THREE.Group();
-      hut.add(box(0.36, 0.26, 0.3, C.hut, 0, 0.04));
-      hut.add(gableRoof(0.5, 0.24, 0.42, C.thatch, 0.3));
-      hut.position.set(0.62, 0, -0.62);
+      hut.add(box(0.3, 0.22, 0.26, C.hut, 0, 0.04));
+      hut.add(gableRoof(0.42, 0.2, 0.36, C.thatch, 0.26));
+      hut.position.set(-0.76, 0, -0.78);
       g.add(hut);
+      g.add(kit(models, 'wheelbarrow', 0.78, 0.04, -0.72, 0.9, 0.6));
+      g.add(kit(models, 'sack', 0.62, 0.04, -0.86, 1.2));
       break;
     }
     case 'orchard': {
-      g.add(box(1.96, 0.04, 1.96, 0xa3d16c));
-      for (let i = 0; i < 9; i++) {
+      // Rows of small fruit trees inside a wooden fence.
+      g.add(box(1.96, 0.04, 1.96, 0x9ccc65));
+      for (let i = 0; i < 6; i++) {
         const x = ((i % 3) - 1) * 0.6;
-        const z = (Math.floor(i / 3) - 1) * 0.6;
-        g.add(box(0.07, 0.22, 0.07, C.trunk, x, 0.04, z));
-        const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(0.24, 0), mat(C.leaves[(i + v) % C.leaves.length]));
-        crown.position.set(x, 0.42, z);
-        crown.scale.y = 0.85;
-        g.add(crown);
-        for (let f = 0; f < 3; f++) {
-          const fruit = new THREE.Mesh(new THREE.IcosahedronGeometry(0.05, 0), mat(C.fruit));
-          const a = f * 2.1 + i;
-          fruit.position.set(x + Math.cos(a) * 0.18, 0.38 + (f % 2) * 0.08, z + Math.sin(a) * 0.18);
+        const z = (Math.floor(i / 3) - 0.5) * 0.7 - 0.15;
+        g.add(kit(models, (['tree_1a', 'tree_3a', 'tree_1b'] as const)[(i + v) % 3], x, 0.04, z, 0.11, i * 1.3));
+        for (let f = 0; f < 4; f++) {
+          const fruit = new THREE.Mesh(new THREE.IcosahedronGeometry(0.045, 0), mat(C.fruit));
+          const a = f * 1.7 + i;
+          fruit.position.set(x + Math.cos(a) * 0.15, 0.32 + (f % 2) * 0.08, z + Math.sin(a) * 0.15);
           g.add(fruit);
         }
       }
+      for (const s of [-1, 1]) {
+        g.add(kit(models, 'fence', s * 0.97, 0.04, -0.5, 0.5, Math.PI / 2));
+        g.add(kit(models, 'fence', s * 0.97, 0.04, 0.5, 0.5, Math.PI / 2));
+      }
+      g.add(kit(models, 'fence', -0.5, 0.04, -0.97, 0.5));
+      g.add(kit(models, 'fence', 0.5, 0.04, -0.97, 0.5));
       break;
     }
     case 'mill': {
       g.add(kit(models, 'base', 0, 0, 0, 1));
-      g.add(box(1.1, 0.62, 0.85, C.mill, -0.25, 0.05, 0.25));
-      g.add(gableRoof(1.22, 0.38, 0.97, C.millRoof, 0.67).translateX(-0.25).translateZ(0.25));
-      g.add(box(0.36, 0.3, 0.04, 0x6b4a3a, -0.25, 0.05, 0.69)); // door
-      for (let i = 0; i < 2; i++) {
-        const silo = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 1.0, 10), mat(C.silo));
-        silo.position.set(0.6, 0.55, -0.45 + i * 0.48);
-        g.add(silo);
-        const cap = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.2, 10), mat(C.millRoof));
-        cap.position.set(0.6, 1.15, -0.45 + i * 0.48);
-        g.add(cap);
+      if (opts.waterSide !== null) {
+        g.add(kit(models, 'watermill', 0, 0.05, -0.15, 1.15, opts.waterSide));
+      } else {
+        g.add(kit(models, 'windmill', 0, 0.05, -0.2, 1.4, opts.front));
       }
-      for (let i = 0; i < 4; i++) g.add(box(0.18, 0.1, 0.13, 0xf2d48f, -0.65 + (i % 2) * 0.2, 0.05 + Math.floor(i / 2) * 0.1, -0.6));
-      g.add(kit(models, 'box_A', -0.15, 0.05, -0.65));
-      g.add(kit(models, 'dumpster', 0.62, 0.05, 0.68, KAYKIT_SCALE, Math.PI));
+      g.add(kit(models, 'barrel', 0.85, 0.05, -0.85, 1.1));
+      g.add(kit(models, 'crate_small', -0.85, 0.05, -0.85, 1.4, 0.4));
       break;
     }
     case 'market': {
       g.add(kit(models, 'base', 0, 0, 0, 1));
-      g.add(box(1.4, 0.42, 1.0, 0xf4ead5, 0, 0.05, 0.3));
-      g.add(gableRoof(1.55, 0.45, 1.15, C.marketRoof, 0.47).translateZ(0.3));
-      // Striped awning stalls in front, with produce.
-      for (let i = 0; i < 3; i++) {
-        const x = -0.6 + i * 0.6;
-        g.add(box(0.04, 0.36, 0.04, 0x7a5236, x - 0.2, 0.05, -0.72));
-        g.add(box(0.04, 0.36, 0.04, 0x7a5236, x + 0.2, 0.05, -0.72));
-        g.add(box(0.5, 0.05, 0.42, C.awning[i % 2], x, 0.41, -0.62));
-        g.add(box(0.42, 0.12, 0.22, 0xb5895a, x, 0.05, -0.62));
-        g.add(box(0.34, 0.06, 0.16, [0xf29f3d, 0x8cc66b, 0xe8574a][i], x, 0.17, -0.62));
-      }
-      g.add(kit(models, 'bench', 0.7, 0.05, 0.1, KAYKIT_SCALE, -Math.PI / 2));
-      g.add(kit(models, 'bush', -0.8, 0.05, 0.8));
-      g.add(kit(models, 'bush', 0.8, 0.05, 0.8));
+      g.add(kit(models, 'market', 0, 0.05, 0.05, 1.05, opts.front));
+      g.add(kit(models, 'bench', -0.75, 0.05, -0.8, KAYKIT_SCALE));
+      g.add(kit(models, 'bush_1a', 0.82, 0.05, -0.82, 0.9));
       break;
     }
     case 'house':
@@ -754,16 +864,15 @@ function makeBuilding(b: Building, models: Models): THREE.Group {
   return g;
 }
 
-function makeTruck(t: Truck, models: Models): THREE.Group {
+function makeTruck(t: Truck, models: Models, cargoScale: number): THREE.Group {
   const g = new THREE.Group();
   const car = models[CAR_BY_COLOR[t.color] ?? 'car_stationwagon'].clone();
   car.scale.setScalar(KAYKIT_SCALE);
   g.add(car);
-  // Crates strapped to the roof when loaded.
+  // The cargo is visible on the roof while loaded: tarp-covered paddy, rice sacks or fruit crates.
   const cargo = new THREE.Group();
   cargo.name = 'cargo';
-  cargo.add(kit(models, 'box_A', 0, 0.155, -0.06, 0.55));
-  cargo.add(kit(models, 'box_B', 0.02, 0.155, 0.08, 0.55, 0.4));
+  cargo.add(kit(models, CARGO_PILE[t.cargo].model, 0, 0.155, -0.02, cargoScale));
   g.add(cargo);
   return g;
 }

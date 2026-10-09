@@ -21,9 +21,10 @@ Node is installed via nvm-windows at `C:\nvm4w\nodejs`; if `node` is not on PATH
 - Sim commands return i18n keys as failure reasons, never display text.
 - When the Browser pane is hidden, `requestAnimationFrame` does not run: drive the sim with `game.sim.step()` and call `game.renderer.render()` before screenshots.
 - Screenshots when the app window is hidden/minimized: in the page run `await game.debugShot('name')` → saved to `.shots/name.jpg` (dev server only), then Read the file.
-- `debug-models.html` (dev only) shows KayKit road pieces from above to check model orientation.
 
 ## Assets
 
-- `public/models/kaykit/` — KayKit City Builder Bits 1.0 by Kay Lousberg, CC0 (license file alongside). Credit "Kay Lousberg, www.kaylousberg.com" in the game credits (optional but kind).
+- `public/models/{kaykit,forest,medieval,resources}/` — KayKit packs by Kay Lousberg, all CC0 (license file in each folder): City Builder Bits, Forest Nature Pack, Medieval Hexagon Pack, Resource Bits. Only the models we use are copied; the full zips sit untracked in the repo root. Credit "Kay Lousberg, www.kaylousberg.com" in the game credits (optional but kind).
+- Model keys → files: `MODEL_FILES` in `src/render/assets.ts`. Nature props are sized by their bounding box (`modelWidth`), since native sizes vary a lot.
+- `debug-models.html?m=forest/Tree_1_A_Color1,medieval/building_grain&s=1` (dev only) renders models with +X/+Z markers and saves `.shots/models.jpg`.
 - KayKit tile = 2 units → scaled 0.5 (`KAYKIT_SCALE`). Road pieces: straight runs N–S, corner joins E+S, T-split joins N+S+E; building fronts and car noses face +Z. Auto-tiling lives in `ROAD_TABLE` in `src/render/Renderer.ts`.

@@ -70,7 +70,7 @@ export class Game {
   private labels = new Map<number, HTMLDivElement>();
 
   constructor(
-    canvasHost: HTMLElement,
+    private canvasHost: HTMLElement,
     private labelHost: HTMLElement,
     seed: number,
     models: Models,
@@ -214,8 +214,11 @@ export class Game {
 
   /** Dev helper: renders a frame and saves the canvas to .shots/<name>.jpg via the Vite dev server. */
   async debugShot(name = 'shot') {
+    const hidden = this.canvasHost.clientWidth === 0;
+    if (hidden) this.renderer.resize(1280, 720);
     for (let i = 0; i < 20; i++) this.renderer.render();
     const data = this.renderer.renderer.domElement.toDataURL('image/jpeg', 0.85);
+    if (hidden) this.renderer.resize();
     const res = await fetch('/__shot', { method: 'POST', body: JSON.stringify({ name, data }) });
     return res.text();
   }

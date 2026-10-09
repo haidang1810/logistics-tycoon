@@ -1,33 +1,49 @@
-// Dev-only page: shows KayKit road pieces from above with axis markers, to check orientation.
+// Dev-only page: lays out models in a grid with +X (red) / +Z (blue) markers to check scale and orientation.
+// Usage: /debug-models.html?m=forest/Tree_1_A_Color1,medieval/building_grain&s=1  (s = scale)
+// After loading it saves a screenshot to .shots/models.jpg via the dev server.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
-const names = ['road_straight', 'road_corner', 'road_corner_curved', 'road_tsplit', 'road_junction', 'road_straight_crossing', 'car_sedan', 'building_A'];
+const params = new URLSearchParams(location.search);
+const names = (params.get('m') ?? 'kaykit/road_straight,kaykit/road_corner_curved,kaykit/road_tsplit,kaykit/road_junction').split(',');
+const scale = Number(params.get('s') ?? 1);
+const cols = Math.ceil(Math.sqrt(names.length));
+const cell = 2.4;
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(innerWidth, innerHeight);
+renderer.setSize(1280, 720);
 document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x335533);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 3));
-const cam = new THREE.OrthographicCamera(-1, 17, 2, -2, 0.1, 100);
-cam.position.set(0, 20, 0);
-cam.up.set(0, 0, -1); // screen up = -Z, screen right = +X
-cam.lookAt(0, 0, 0);
-cam.position.x = 0; 
+scene.background = new THREE.Color(0x446644);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x666666, 2.5));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(-3, 6, 4);
+scene.add(sun);
+
+const size = cols * cell;
+const cam = new THREE.PerspectiveCamera(35, 1280 / 720, 0.1, 200);
+cam.position.set(size / 2 - cell / 2, size * 0.9, size * 1.25);
+cam.lookAt(size / 2 - cell / 2, 0, size / 2 - cell / 2);
+
 const loader = new GLTFLoader();
-names.forEach((n, i) => {
-  loader.load(`/models/kaykit/${n}.gltf`, (g) => {
-    g.scene.position.set(i * 2.2 + 0.2, 0, 0);
+await Promise.all(
+  names.map(async (n, i) => {
+    const g = await loader.loadAsync(`/models/${n}.gltf`);
+    const x = (i % cols) * cell;
+    const z = Math.floor(i / cols) * cell;
+    g.scene.scale.setScalar(scale);
+    g.scene.position.set(x, 0, z);
     scene.add(g.scene);
-    // red marker at +X edge, blue marker at +Z edge
-    const r = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.3, 0.15), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
-    r.position.set(i * 2.2 + 0.2 + 0.95, 0.5, 0);
-    const b = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.3, 0.15), new THREE.MeshBasicMaterial({ color: 0x0000ff }));
-    b.position.set(i * 2.2 + 0.2, 0.5, 0.95);
-    scene.add(r, b);
-    renderer.render(scene, cam);
-  });
-});
-cam.left = -1; cam.right = names.length * 2.2; cam.top = (cam.right + 1) * innerHeight / innerWidth / 2; cam.bottom = -cam.top;
-cam.updateProjectionMatrix();
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(2, 0.02, 2), new THREE.MeshStandardMaterial({ color: 0x557755 }));
+    plate.position.set(x, -0.01, z);
+    const r = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.12), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+    r.position.set(x + 1, 0.06, z);
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.12), new THREE.MeshBasicMaterial({ color: 0x0000ff }));
+    b.position.set(x, 0.06, z + 1);
+    scene.add(plate, r, b);
+  }),
+);
 renderer.render(scene, cam);
+const data = renderer.domElement.toDataURL('image/jpeg', 0.85);
+await fetch('/__shot', { method: 'POST', body: JSON.stringify({ name: params.get('shot') ?? 'models', data }) });
+document.title = 'done';
