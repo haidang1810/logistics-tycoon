@@ -2,7 +2,7 @@
 
 Top-down low-poly logistics tycoon + roguelite set in Vietnam (cozy tone). Claude writes all the code; the user is designer/playtester.
 
-- Design: `docs/GDD.md` (source of truth for gameplay). Architecture: `docs/ARCHITECTURE.md`.
+- Design: `docs/GDD.md` (source of truth for gameplay). Architecture: `docs/ARCHITECTURE.md`. Status, roadmap, asset inventory: `docs/PROGRESS.md` (keep it updated after each milestone).
 - Stack: TypeScript, Vite, React 19, Three.js, Vitest.
 
 ## Commands
